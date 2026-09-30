@@ -22,8 +22,9 @@ tunnel back for as long as you need it. Disconnect the VPN and Check Point's own
 A-Train is the speedster in *The Boys*: the fastest man alive, and not a nice guy. The joke wrote itself.
 Hub-mode VPN makes your laptop feel like it is wading through mud; this app makes it fast again, and it does
 so by being slightly ruthless with someone else's routing table. The icon is an original mark, an italic A
-with speed streaks, and the dashboard can play a background clip of the character if you supply one
-(see `app/video/README.txt`). The project is not affiliated with Amazon, Sony, or Check Point.
+with speed streaks, and the dashboard plays a green-screen clip of the character behind the cards. The clip
+is not in this repository: `app/build.sh` downloads it with `yt-dlp` on first build, with credit to its
+creator in the footer (see `app/video/README.txt`). The project is not affiliated with Amazon, Sony, or Check Point.
 
 ## What you get
 

@@ -15,6 +15,7 @@ mkdir -p "$(dirname "$APP")"
 echo "$APP" > "$HERE/.last-build-path"
 BIN="$APP/Contents/MacOS/A-Train"
 
+bash "$HERE/video/fetch.sh"                    # background clip: downloaded once, never stored in git
 pkill -x "A-Train" 2>/dev/null || true
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # universal binary (Apple Silicon + Intel) so the app can be shared
