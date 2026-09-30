@@ -1,0 +1,13 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test-and-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Daemon self-test
+        run: python3 daemon/vpnsplitd.py --self-test
+      - name: Build the app (universal binary)
+        run: bash app/build.sh
+      - name: Package (unsigned)
+        run: ATRAIN_SKIP_BUILD=1 bash dist/make-pkg.sh && ls -la dist/*.pkg

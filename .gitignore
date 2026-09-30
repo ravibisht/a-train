@@ -1,0 +1,18 @@
+# per-machine state and user config (never publish)
+config/
+backups/
+app/.last-build-path
+# build products
+app/build/
+dist/*.dmg
+dist/*.pkg
+dist/version.json
+dist/checkpoint/*.pkg
+# company-specific defaults for internal builds (see dist/profile/README.txt in your local copy)
+dist/profile/
+# third-party footage (see app/video/README.txt)
+app/video/*.mp4
+# generated installer artwork
+dist/pkg/resources/background*.png
+__pycache__/
+.DS_Store

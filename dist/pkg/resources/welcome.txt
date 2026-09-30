@@ -1,0 +1,7 @@
+Made out of frustration, so you don’t have to be.
+
+A-Train sends only your company's internal subnets through the Check Point VPN. Everything else keeps using your normal internet, and a menu bar switch gives you the full VPN back whenever you need it.
+
+This installer puts A-Train.app in Applications, installs a small background service (it needs your Mac password for that), and copies the tooling and guide to your home folder (~/vpn-split, ~/VPN-docs).
+
+Requires macOS 13 or newer and the Check Point Endpoint Security VPN client. Fully reversible: sudo ~/vpn-split/uninstall.sh

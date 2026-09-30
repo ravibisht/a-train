@@ -1,0 +1,16 @@
+# Routes that go THROUGH the VPN. Everything not listed here uses normal Wi-Fi.
+#
+# One entry per line. Accepted forms:
+#   private                   every private network (10/8, 172.16/12, 192.168/16) except the one this Mac is on
+#   10.26.0.0/16              a subnet (CIDR)
+#   10.25.8.118               a single IP
+#   db.internal.example.com   a domain name: resolved every 5 minutes, every IP it returns gets a route
+#   *.example.com             a WHOLE domain: any subdomain you visit is routed via the VPN automatically
+#   10.50.0.0/16 via azure    send an entry through the Azure VPN client instead of Check Point
+#
+# Anything after # on a line is a comment.
+# Put "#off " in front of an entry to disable it without deleting it (the A-Train toggle does this).
+# Changes are picked up automatically within a couple of seconds while the VPN is connected.
+
+private              # zero-config default: all internal networks, your own LAN stays local
+*.example.com    # company services that check your source IP

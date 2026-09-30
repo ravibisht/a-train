@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>A-Train</title>
+  <organization>com.ravi</organization>
+  <options customize="never" require-scripts="true" hostArchitectures="x86_64,arm64" rootVolumeOnly="true"/>
+  <domains enable_localSystem="true"/>
+  <background file="background.png" alignment="bottomleft" scaling="none" mime-type="image/png"/>
+  <background-darkAqua file="background-dark.png" alignment="bottomleft" scaling="none" mime-type="image/png"/>
+  <welcome file="welcome.txt" mime-type="text/plain"/>
+  <conclusion file="conclusion.txt" mime-type="text/plain"/>
+  <volume-check>
+    <allowed-os-versions><os-version min="13.0"/></allowed-os-versions>
+  </volume-check>
+  <choices-outline><line choice="default"><line choice="com.ravi.atrain.pkg"/></line></choices-outline>
+  <choice id="default"/>
+  <choice id="com.ravi.atrain.pkg" visible="false"><pkg-ref id="com.ravi.atrain.pkg"/></choice>
+  <pkg-ref id="com.ravi.atrain.pkg" version="__VERSION__" onConclusion="none">A-Train-component.pkg</pkg-ref>
+</installer-gui-script>

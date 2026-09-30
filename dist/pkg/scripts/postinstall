@@ -1,0 +1,75 @@
+#!/bin/bash
+# postinstall — runs as root from Installer.app after the payload (A-Train.app, /usr/local/vpn-split/pkg)
+# is on disk. Sets the user up exactly like the manual installer: tooling in ~/vpn-split, guide in
+# ~/VPN-docs, the root daemon loaded, the app started. Log: /var/log/atrain-install.log
+set -u
+LOG=/var/log/atrain-install.log
+exec > >(tee -a "$LOG") 2>&1
+echo "== A-Train postinstall $(date)  pkg=$1 target=$3"
+PKGDIR=/usr/local/vpn-split/pkg
+U="${USER:-}"
+[[ -z "$U" || "$U" == root ]] && U="$(stat -f %Su /dev/console 2>/dev/null || true)"   # `sudo installer` from Terminal
+UIDN="$(id -u "$U" 2>/dev/null || echo 0)"
+
+fail() {
+  echo "FAILED: $1"
+  if [[ "$UIDN" != 0 ]]; then
+    launchctl asuser "$UIDN" sudo -u "$U" osascript -e "display dialog \"A-Train could not finish installing:\n\n$1\n\nDetails: $LOG\" buttons {\"OK\"} default button 1 with icon stop with title \"A-Train\"" >/dev/null 2>&1 || true
+  fi
+  exit 1
+}
+# A-Train is per user (config, Keychain, login item). Refuse to set up "root" (login window / MDM push).
+[[ -n "$U" && "$U" != root && "$UIDN" -ge 500 ]] || fail "no logged-in user to install for. Run the installer from your own account (not at the login window or via MDM)."
+UH="$(dscl . -read "/Users/$U" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory: //')"   # sed, not awk: homes may contain spaces
+[[ -d "$UH" ]] || fail "home directory of $U not found ($UH)"
+echo "installing for user $U ($UH)"
+
+# 1. tooling + docs into the user's home (keeps an existing routes.conf / control.json / backups)
+mkdir -p "$UH/vpn-split" "$UH/VPN-docs"
+rsync -a --exclude 'config/routes.conf' --exclude 'config/control.json' --exclude 'backups' \
+  "$PKGDIR/vpn-split/" "$UH/vpn-split/"
+rsync -a "$PKGDIR/VPN-docs/" "$UH/VPN-docs/"
+chmod +x "$UH"/vpn-split/*.sh "$UH"/vpn-split/app/*.sh 2>/dev/null || true
+chown -R "$U":staff "$UH/vpn-split" "$UH/VPN-docs"
+
+# 2. Check Point client, only if a package was bundled and the client is missing
+TRAC="/Library/Application Support/Checkpoint/Endpoint Connect/trac"
+CPPKG="$(ls "$PKGDIR"/checkpoint/*.pkg 2>/dev/null | head -1 || true)"
+if [[ ! -x "$TRAC" && -n "$CPPKG" ]]; then
+  echo "installing bundled Check Point client $(basename "$CPPKG")"
+  if /usr/sbin/installer -pkg "$CPPKG" -target / ; then
+    for i in $(seq 1 20); do [[ -x "$TRAC" ]] && break; sleep 1; done
+    if [[ -x "$TRAC" && -f "$PKGDIR/vpn-split/daemon/sites.txt" ]]; then
+      while read -r addr name; do                      # dist/profile/sites.txt: "address  display name"
+        [[ -z "$addr" || "$addr" == \#* ]] && continue
+        launchctl asuser "$UIDN" sudo -u "$U" "$TRAC" create -s "$addr" -di "$name" -a username-password >/dev/null 2>&1 || true
+      done < "$PKGDIR/vpn-split/daemon/sites.txt"
+    fi
+  else
+    echo "Check Point install failed; continuing with A-Train only"
+  fi
+elif [[ ! -x "$TRAC" ]]; then
+  echo "note: Check Point client not installed; A-Train idles until it is"
+fi
+
+# 3. the root daemon (self-test, LaunchDaemon, 15 s start verification live in install.sh).
+#    Run the ROOT-OWNED copy from the package payload, never the one in the user's home: root must not
+#    execute a user-writable script. install.sh resolves daemon/vpnsplitd.py next to itself (also root-owned).
+if ! VPNSPLIT_USER="$U" /bin/bash "$PKGDIR/vpn-split/install.sh"; then
+  fail "the background service did not start. Most often Python 3 is missing: open Terminal, run  xcode-select --install , then run this installer again."
+fi
+
+# 4. the app (installed by the payload in /Applications; Installer never quarantines it)
+pkill -x "A-Train" 2>/dev/null || true
+if [[ -d /Applications/A-Train.app && -d "$UH/Applications/A-Train.app" ]]; then
+  echo "removing older per-user copy $UH/Applications/A-Train.app (the package installs /Applications/A-Train.app)"
+  rm -rf "$UH/Applications/A-Train.app"
+fi
+if [[ -d /Applications/A-Train.app ]]; then
+  launchctl asuser "$UIDN" sudo -u "$U" open -a /Applications/A-Train.app >/dev/null 2>&1 || true
+else
+  echo "WARNING: /Applications/A-Train.app missing after install (relocated?); starting whatever exists"
+  launchctl asuser "$UIDN" sudo -u "$U" open -b com.ravi.atrain >/dev/null 2>&1 || true
+fi
+echo "== done"
+exit 0
