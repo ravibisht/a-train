@@ -44,9 +44,9 @@ fi
 codesign --verify --deep --strict "$STAGE/Applications/A-Train.app"
 
 echo "- staging tooling and docs"
-rsync -a --exclude 'config/' --exclude 'backups/' --exclude 'dist/' --exclude '.DS_Store' --exclude '__pycache__' \
+rsync -a --exclude 'config/' --exclude 'backups/' --exclude 'dist/' --exclude '.git/' --exclude '.github/' --exclude '.DS_Store' --exclude '__pycache__' \
   --exclude 'app/build/' --exclude 'app/.last-build-path' "$ROOT/" "$STAGE/usr/local/vpn-split/pkg/vpn-split/"
-rsync -a --exclude '.DS_Store' "$HOME/VPN-docs/" "$STAGE/usr/local/vpn-split/pkg/VPN-docs/"
+rsync -a --exclude '.DS_Store' "$ROOT/docs/" "$STAGE/usr/local/vpn-split/pkg/VPN-docs/"   # docs/ in the repo -> ~/VPN-docs on the target
 if ls "$DIST"/checkpoint/*.pkg >/dev/null 2>&1; then
   mkdir -p "$STAGE/usr/local/vpn-split/pkg/checkpoint"; cp "$DIST"/checkpoint/*.pkg "$STAGE/usr/local/vpn-split/pkg/checkpoint/"
   echo "- Check Point client package bundled"

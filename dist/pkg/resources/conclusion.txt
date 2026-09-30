@@ -2,6 +2,6 @@ A-Train is running: look for the "A" icon in the menu bar. Click it (or open A-T
 
 First time: click Connect VPN, enter your VPN password once, and it is kept in your Keychain.
 
-Guide with the how-it-works, revert and troubleshooting steps: ~/VPN-docs/README.md
+Guide with the how-it-works, revert and troubleshooting steps: ~/VPN-docs/GUIDE.md
 
 A-Train. Made out of frustration, so you don’t have to be.

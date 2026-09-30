@@ -20,7 +20,7 @@ WHAT GETS INSTALLED
   /Applications/A-Train.app                 menu bar app (starts at login, quit any time)
   /usr/local/vpn-split/  + a LaunchDaemon   background service that adjusts routes when the VPN connects
   ~/vpn-split/                              tooling, scripts, config (routes.conf = what goes via VPN)
-  ~/VPN-docs/README.md                      full guide: how it works, how to revert, what to do if stuck
+  ~/VPN-docs/GUIDE.md                      full guide: how it works, how to revert, what to do if stuck
 
 DEFAULT ROUTES VIA VPN
   10.25.0.0/16 and 10.26.0.0/16 (internal / QA database). Edit ~/vpn-split/config/routes.conf

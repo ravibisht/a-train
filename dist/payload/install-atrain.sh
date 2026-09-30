@@ -76,5 +76,5 @@ Done. A-Train is the shield icon in your menu bar.
   - Solid italic "A" with speed streaks = split mode: only the routes in ~/vpn-split/config/routes.conf use the VPN
   - Menu > Switch to Full VPN when you need a company website that only allows the office IP
   - Menu > Routes via VPN > Add domain or IP...  to route more through the VPN
-Guide: ~/VPN-docs/README.md      Remove everything: sudo ~/vpn-split/uninstall.sh, then delete A-Train.app
+Guide: ~/VPN-docs/GUIDE.md      Remove everything: sudo ~/vpn-split/uninstall.sh, then delete A-Train.app
 EOF

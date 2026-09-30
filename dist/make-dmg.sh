@@ -25,8 +25,8 @@ elif [[ -f "$STAGE/payload/A-Train.app/Contents/Resources/atrain.mp4" ]]; then
 fi
 
 echo "- staging tooling and docs"
-rsync -a --exclude 'config/' --exclude 'backups/' --exclude 'dist/' --exclude '.DS_Store' --exclude 'app/build/' "$ROOT/" "$STAGE/payload/vpn-split/"
-rsync -a --exclude '.DS_Store' "$HOME/VPN-docs/" "$STAGE/payload/VPN-docs/"
+rsync -a --exclude 'config/' --exclude 'backups/' --exclude 'dist/' --exclude '.git/' --exclude '.github/' --exclude '.DS_Store' --exclude 'app/build/' "$ROOT/" "$STAGE/payload/vpn-split/"
+rsync -a --exclude '.DS_Store' "$ROOT/docs/" "$STAGE/payload/VPN-docs/"
 cp "$DIST/payload/install-atrain.sh" "$STAGE/payload/install-atrain.sh"
 cp "$DIST/payload/README.txt" "$STAGE/README.txt"
 if ls "$DIST"/checkpoint/*.pkg >/dev/null 2>&1; then
