@@ -61,6 +61,8 @@ if [[ -n "$APP_ID" ]]; then
   fi
 fi
 cp "$OUT" "$HOME/Desktop/" 2>/dev/null && echo "- copied to ~/Desktop"
+# archive copy per build, so an older DMG is never lost when the fixed-name one is overwritten
+mkdir -p "$DIST/archive" && cp "$OUT" "$DIST/archive/A-Train-$VERSION-build$(plutil -extract CFBundleVersion raw "$(cat "$ROOT/app/.last-build-path")/Contents/Info.plist").dmg" && echo "- archived in dist/archive/"
 rm -rf "$(dirname "$STAGE")"
 # version.json for the in-app update check: host it anywhere (ATRAIN_UPDATE_URL = where the DMG will live)
 BUILD="$(plutil -extract CFBundleVersion raw "$(cat "$ROOT/app/.last-build-path" 2>/dev/null || echo "$HOME/Applications/A-Train.app")/Contents/Info.plist" 2>/dev/null || echo 0)"
