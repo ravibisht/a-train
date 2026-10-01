@@ -61,6 +61,8 @@ if [[ -n "$APP_ID" ]]; then
   fi
 fi
 cp "$OUT" "$HOME/Desktop/" 2>/dev/null && echo "- copied to ~/Desktop"
+# a zipped pkg travels through mail/chat services that strip or block .pkg and .dmg attachments
+(cd "$DIST" && ditto -c -k --keepParent "A-Train-$VERSION.pkg" "A-Train-$VERSION.pkg.zip") && cp "$DIST/A-Train-$VERSION.pkg.zip" "$HOME/Desktop/" && echo "- zipped pkg for sending: A-Train-$VERSION.pkg.zip"
 # archive copy per build, so an older DMG is never lost when the fixed-name one is overwritten
 mkdir -p "$DIST/archive" && cp "$OUT" "$DIST/archive/A-Train-$VERSION-build$(plutil -extract CFBundleVersion raw "$(cat "$ROOT/app/.last-build-path")/Contents/Info.plist").dmg" && echo "- archived in dist/archive/"
 rm -rf "$(dirname "$STAGE")"

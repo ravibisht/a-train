@@ -17,3 +17,4 @@ dist/pkg/resources/background*.png
 __pycache__/
 .DS_Store
 dist/archive/
+dist/*.zip
