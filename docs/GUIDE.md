@@ -687,23 +687,32 @@ VPN so Check Point pushes its DNS again, and check the Reachability card.
 - Route a website…: paste an address, its registrable domain becomes a `*.domain` entry.
 - New installs get `private` as the only route entry. Existing routes.conf files are not changed.
 
-## 24. Azure VPN cannot connect while Check Point is up (2026-10-06, daemon 1.5.1)
+## 24. Azure VPN cannot connect while Check Point is up (2026-10-06, daemon 1.6.0)
 
-Symptom: Azure VPN Client sits in "Connecting"; its extension log says `Address resolution failed for
-azuregateway-….vpn.azure.com` every 30 s. The moment Check Point disconnects, Azure connects.
+Symptom: Azure VPN Client sits in "Connecting" (its extension logs `Address resolution failed` for the
+gateway, or `MSAL refresh … failed` once its sign-in token has expired). The moment Check Point disconnects,
+Azure connects.
 
-Cause: Check Point sets the office DNS servers (10.0.10.x) as the resolver for the Wi-Fi interface as well
-as globally. Those servers are only reachable inside the Check Point tunnel. Normal lookups work, because
-the daemon routes them through the tunnel. But a network-extension VPN client resolves its gateway name
-*bound to the Wi-Fi interface* to avoid routing into a tunnel, and a Wi-Fi-bound query to 10.0.10.16 goes
-nowhere. Proven with a UDP query bound to en0: office DNS times out, home router answers in 11 ms;
-`dns-sd -i en0 -G v4 www.apple.com` gets no answer at all while Check Point is up.
+Cause: Check Point writes its office DNS servers (10.0.10.x) into the **manual DNS slot of the Wi-Fi
+service** (what System Settings > Wi-Fi > DNS shows; `Setup:/Network/Service/<id>/DNS`). That makes them the
+resolver for lookups bound to the Wi-Fi interface as well as globally. They are reachable only inside the
+Check Point tunnel. Ordinary lookups still work because the daemon routes them through the tunnel, but a
+network-extension VPN client resolves *bound to Wi-Fi* so it never routes into another tunnel, and a Wi-Fi-
+bound query to 10.0.10.16 goes nowhere. Proof: a UDP DNS query bound to en0 times out against 10.0.10.16
+and is answered in 11 ms by the home router; `dns-sd -i en0 -G v4 www.apple.com` gets nothing while Check
+Point is up. Pinning only the gateway in /etc/hosts was not enough: the Microsoft sign-in refresh needs
+login.microsoftonline.com and more.
 
-Fix, two new entry forms, both `via local` (DNS only, never routed):
-- `*.vpn.azure.com via local` writes `/etc/resolver/vpn.azure.com` pointing at the LAN resolvers the
-  daemon learned while no tunnel was up.
-- `azuregateway-….vpn.azure.com via local` resolves that one host through the LAN DNS directly and pins it in
-  `/etc/hosts` between `# >>> vpnsplitd` markers. Hosts entries are consulted before any resolver, scoped or
-  not, so this is the form that is certain to work. Pins are removed on disconnect and by uninstall.sh.
-The gateway hostname is `scutil --nc show <azure service id>` → RemoteAddress. Both forms stay active in
-Full VPN too. The dashboard offers "Local DNS" as a third tunnel choice for *.domain rows.
+Fix (split mode): the daemon remembers the pushed servers for the session (`applied.json` → `vpn_dns`),
+clears the manual slot back to automatic (`networksetup -setdnsservers Wi-Fi Empty`), and keeps the office
+DNS for company domains only, through the wildcard forwarder (`*.policybazaar.ae` and any other `*.suffix`
+entry) with the servers still routed via the tunnel. Public names now resolve on your own network, which is
+also faster. Full VPN writes the office DNS back into the slot; disconnect returns it to automatic (Check
+Point does the same). Log line: `Wi-Fi DNS: automatic (office DNS … kept for company domains via the forwarder)`.
+Trade-off: a hostname that exists only on the office DNS and is not under a `*.suffix` entry will not
+resolve in split mode; add its domain as a wildcard entry.
+
+Also available, `via local` entries (DNS only, never routed): `*.suffix via local` writes a resolver file
+pointing at the LAN resolvers; `host via local` pins the host in `/etc/hosts` between `# >>> vpnsplitd`
+markers after resolving it through the LAN DNS. Both stay active in Full VPN and are removed on disconnect
+and by uninstall.sh. The Azure gateway hostname is `scutil --nc show <azure service id>` → RemoteAddress.

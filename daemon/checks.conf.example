@@ -1,0 +1,3 @@
+# Reachability checks (host:port # label). Shipped with the internal build via dist/profile/.
+10.26.4.27:3306    # journey QA DB (qa-uae-new-cluster...rds.amazonaws.com)
+10.25.8.118:22     # restate box

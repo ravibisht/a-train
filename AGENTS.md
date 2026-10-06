@@ -66,6 +66,11 @@ Each of these exists because it broke once. Keep them when changing nearby code.
 - **`private` carves out the LAN** (`private_targets`, `lan_carve`): RFC1918 minus every directly connected
   private network, recomputed each evaluate, so the LAN gateway and LAN devices never enter the tunnel.
   Prefixes stay ≥ /8 (`MIN_PREFIX`).
+- **Split DNS.** Check Point fills the primary service's *manual* DNS slot with office servers reachable
+  only in its tunnel, which breaks every Wi-Fi-bound lookup (network-extension VPN clients). In split
+  mode the daemon remembers them (`State.vpn_dns`), clears the slot to automatic (`set_manual_dns`),
+  and serves company domains through the wildcard forwarder; Full VPN writes them back. Attribution of
+  pushed DNS happens once per session, since the slot no longer shows them after clearing.
 - **`via local` is DNS-only.** `*.suffix via local` writes a resolver file pointing at the LAN baseline
   resolvers; `host via local` pins the host in `/etc/hosts` between `HOSTS_BEGIN`/`HOSTS_END` markers after
   resolving it through the LAN DNS (`lan_resolve`, raw UDP). Neither ever adds a route. Needed because

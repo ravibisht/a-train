@@ -7,13 +7,12 @@
 #   db.internal.example.com   a domain name: resolved every 5 minutes, every IP it returns gets a route
 #   *.example.com             a WHOLE domain: any subdomain you visit is routed via the VPN automatically
 #   10.50.0.0/16 via azure    send an entry through the Azure VPN client instead of Check Point
-#   *.vpn.azure.com via local resolve this domain on your Wi-Fi DNS and never route it (other VPN clients)
-#   gw.example.net via local  pin one hostname in /etc/hosts from your Wi-Fi DNS (strongest form of the above)
 #
 # Anything after # on a line is a comment.
 # Put "#off " in front of an entry to disable it without deleting it (the A-Train toggle does this).
 # Changes are picked up automatically within a couple of seconds while the VPN is connected.
 
 private              # zero-config default: all internal networks, your own LAN stays local
-*.example.com    # company services that check your source IP
+*.policybazaar.ae    # company services that check your source IP
 *.vpn.azure.com via local   # Azure VPN gateway name: resolve on Wi-Fi, never through the office DNS
+azuregateway-be57007e-5748-4252-91ec-682e4538193d-ea4688d38cde.vpn.azure.com via local   # Azure gateway host pinned in /etc/hosts so the Azure client can resolve it with Check Point up

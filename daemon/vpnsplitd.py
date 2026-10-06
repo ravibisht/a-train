@@ -38,7 +38,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 
 HOME = os.environ.get("VPNSPLIT_HOME") or os.path.expanduser("~/vpn-split")
 CONF_DIR = os.path.join(HOME, "config")
@@ -75,8 +75,8 @@ def log(msg):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), msg, flush=True)
 
 
-def sh(cmd):
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+def sh(cmd, stdin=None):
+    return subprocess.run(cmd, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
 
 
 # ----------------------------------------------------------------------------- routing table
@@ -262,6 +262,34 @@ def lan_resolve(name, servers, timeout=3.0):
         if ips:
             return sorted(set(ips))
     return []
+
+
+def primary_service():
+    """(service name for networksetup, interface) of the primary network service, e.g. ("Wi-Fi", "en0")."""
+    out = sh(["scutil"], stdin="show State:/Network/Global/IPv4\n").stdout
+    m = re.search(r"PrimaryInterface\s*:\s*(\S+)", out)
+    if not m:
+        return None
+    ifn = m.group(1)
+    order = sh(["networksetup", "-listnetworkserviceorder"]).stdout
+    for mm in re.finditer(r"\(\d+\)\s+(.+?)\n\(Hardware Port: .*?, Device: (\S+)\)", order):
+        if mm.group(2) == ifn:
+            return (mm.group(1).strip(), ifn)
+    return None
+
+
+def set_manual_dns(service, servers):
+    """Write the primary service's manual DNS slot (what System Settings > DNS shows). `servers` empty
+    means "Empty" = automatic (DHCP). Check Point puts its office DNS here while connected, which makes
+    the Wi-Fi-scoped resolver unreachable for anything that resolves bound to Wi-Fi (Azure VPN's extension,
+    any network-extension client). In split mode we clear it; the office DNS stays available for company
+    domains through the forwarder, and its servers stay routed via the tunnel."""
+    r = sh(["networksetup", "-setdnsservers", service] + (list(servers) if servers else ["Empty"]))
+    if r.returncode != 0:
+        log("networksetup -setdnsservers %s failed: %s" % (service, (r.stderr or r.stdout).strip()))
+        return False
+    sh(["dscacheutil", "-flushcache"])
+    return True
 
 
 def lan_gateway(routes):
@@ -666,12 +694,15 @@ class State(object):
         self.az_if = None
         self.lan_dns = []                                 # resolvers in use while NO tunnel was up (baseline)
         self.hosts_pinned = False                         # we currently hold a marked block in /etc/hosts
+        self.vpn_dns = []                                 # DNS servers the VPN pushed this session (seen before we cleared the slot)
+        self.dns_service = None                           # primary service whose manual DNS slot we changed ("Wi-Fi")
+        self.dns_slot = None                              # what we last wrote there: "lan" (Empty) or "vpn"
         self.applied_lan = set()                          # (kind, target, gw): LAN DNS kept reachable in Full VPN
 
     def reset(self):
-        az_if, applied_az, lan_dns, pinned = self.az_if, self.applied_az, self.lan_dns, self.hosts_pinned
+        keep = (self.az_if, self.applied_az, self.lan_dns, self.hosts_pinned, self.dns_service, self.dns_slot)
         self.__init__()
-        self.az_if, self.applied_az, self.lan_dns, self.hosts_pinned = az_if, applied_az, lan_dns, pinned
+        self.az_if, self.applied_az, self.lan_dns, self.hosts_pinned, self.dns_service, self.dns_slot = keep
 
     @classmethod
     def load(cls):
@@ -687,6 +718,8 @@ class State(object):
             st.lan_dns = [str(x) for x in d.get("lan_dns", [])]
             st.applied_lan = {tuple(x) for x in d.get("routes_lan", [])}
             st.hosts_pinned = bool(d.get("hosts_pinned"))
+            st.vpn_dns = [str(x) for x in d.get("vpn_dns", [])]
+            st.dns_service, st.dns_slot = d.get("dns_service"), d.get("dns_slot")
         except (OSError, ValueError, TypeError):
             pass
         return st
@@ -698,7 +731,8 @@ class State(object):
         with open(tmp, "w") as f:
             json.dump({"if": self.ifn, "gw": self.gw, "since": self.since, "backup": self.backup,
                        "routes": sorted(self.applied), "routes_az": sorted(self.applied_az), "az_if": self.az_if,
-                       "lan_dns": self.lan_dns, "routes_lan": sorted(self.applied_lan), "hosts_pinned": self.hosts_pinned}, f)
+                       "lan_dns": self.lan_dns, "routes_lan": sorted(self.applied_lan), "hosts_pinned": self.hosts_pinned,
+                       "vpn_dns": self.vpn_dns, "dns_service": self.dns_service, "dns_slot": self.dns_slot}, f)
         os.replace(tmp, APPLIED_FILE)
 
 
@@ -1030,6 +1064,9 @@ def evaluate(st, ctx, force_resolve=False):
         if st.hosts_pinned:
             sync_hosts_pins({})                           # the pinned gateway names are only needed while tunneled
             st.hosts_pinned = False
+        if st.dns_slot == "vpn" and st.dns_service:
+            set_manual_dns(st.dns_service, [])            # we had put the office DNS back for Full VPN; return to automatic
+        st.dns_slot, st.vpn_dns = None, []
         st.save()
         remove_all_resolvers()                            # let company domains resolve normally off-VPN
         forget_disabled_suffixes(set())
@@ -1065,7 +1102,24 @@ def evaluate(st, ctx, force_resolve=False):
     # tell the DNS forwarder where to forward and which wildcard suffixes are live
     scut = sh(["scutil", "--dns"]).stdout                # before stripping, while scutil still shows them
     dns = parse_dns_servers(scut, lan_networks(routes), exclude=st.lan_dns)
+    if dns and dns != st.vpn_dns:
+        st.vpn_dns = dns                                  # remember: once we clear the slot, scutil no longer shows them
+    dns = dns or st.vpn_dns
     cur_dns = resolver_servers(scut)
+    # The manual DNS slot of the primary service: Check Point fills it with the office DNS. Split mode
+    # clears it (automatic/LAN), so Wi-Fi-scoped lookups work and public names resolve locally; company
+    # domains keep the office DNS through the forwarder. Full VPN puts the office DNS back.
+    if st.vpn_dns:
+        slot_has_vpn = any(a in cur_dns for a in st.vpn_dns)
+        want = "lan" if mode == "split" else "vpn"
+        if (want == "lan" and slot_has_vpn) or (want == "vpn" and not slot_has_vpn):
+            svc = primary_service()
+            if svc and set_manual_dns(svc[0], [] if want == "lan" else st.vpn_dns):
+                st.dns_service, st.dns_slot = svc[0], want
+                log("%s DNS: %s" % (svc[0], "automatic (office DNS %s kept for company domains via the forwarder)" % ", ".join(st.vpn_dns)
+                                          if want == "lan" else "office DNS %s (Full VPN)" % ", ".join(st.vpn_dns)))
+                changed = True
+                cur_dns = resolver_servers(sh(["scutil", "--dns"]).stdout)
     wildcard_suffixes = {e.suffix for e in entries if e.kind == "wildcard" and e.enabled and e.via != "local"}
     local_suffixes = {e.suffix for e in entries if e.kind == "wildcard" and e.enabled and e.via == "local"}
     lan_dns = st.lan_dns or [a for a in cur_dns if a not in dns]
@@ -1865,14 +1919,26 @@ def _e2e_test():
         returncode, stdout, stderr = 0, "", ""
 
     scutil_ns = [["10.0.10.16", "192.168.1.1"]]          # mutable so phases can change what the VPN "pushed"
+    dns_slot = [None]                                      # what networksetup -setdnsservers last wrote (None = untouched)
 
-    def fake_sh(cmd):
+    def fake_sh(cmd, stdin=None):
         r = R()
         if cmd[0] == "netstat":
             r.stdout = "Routing tables\n\nInternet:\nDestination Gateway Flags Netif Expire\n" + \
                        "\n".join("%s %s %s %s" % t for t in table) + "\n"
+        elif cmd[0] == "scutil" and len(cmd) == 1:
+            r.stdout = "  PrimaryInterface : en0\n  PrimaryService : 903815B9\n"
+        elif cmd[0] == "networksetup" and cmd[1] == "-listnetworkserviceorder":
+            r.stdout = "(1) Wi-Fi\n(Hardware Port: Wi-Fi, Device: en0)\n\n(2) Thunderbolt Bridge\n(Hardware Port: Thunderbolt Bridge, Device: bridge0)\n"
+        elif cmd[0] == "networksetup" and cmd[1] == "-setdnsservers":
+            assert cmd[2] == "Wi-Fi", cmd
+            dns_slot[0] = [] if cmd[3:] == ["Empty"] else cmd[3:]
+        elif cmd[0] == "dscacheutil":
+            pass
         elif cmd[0] == "scutil":
-            r.stdout = "DNS configuration\n\nresolver #1\n" + "".join("  nameserver[%d] : %s\n" % (i, a) for i, a in enumerate(scutil_ns[0]))
+            # the manual slot (if the daemon wrote one) overrides what the VPN "pushed"
+            ns = scutil_ns[0] if dns_slot[0] is None else (dns_slot[0] or ["192.168.1.1"])
+            r.stdout = "DNS configuration\n\nresolver #1\n" + "".join("  nameserver[%d] : %s\n" % (i, a) for i, a in enumerate(ns))
         elif cmd[0] == "ifconfig":
             r.stdout = "utun8: flags=8051 mtu 1500\n\tinet 10.229.0.130 --> 10.229.0.130 netmask 0xffffff80\n" if cmd[1] == "utun8" else "utun7: inet 10.0.203.60 --> 10.0.203.59\n"
         elif cmd[0] == "route":
@@ -1937,6 +2003,7 @@ def _e2e_test():
         # Azure also announces 10.26/16 -> Check Point gets two /17s instead of the /16 so it wins
         assert ("net", "10.26.0.0/17") in d and ("net", "10.26.128.0/17") in d and ("net", "10.26.0.0/16") not in d, d
         assert ("host", "10.25.8.118") in d and ("host", "10.0.10.16") in d, d
+        assert dns_slot[0] == [] and st.vpn_dns == ["10.0.10.16"], (dns_slot, st.vpn_dns)   # Wi-Fi DNS back to automatic, office DNS remembered
         assert ("net", "0.0.0.0/5") not in d and ("net", "0.0.0.0/0") not in d, d
         assert ("default", GW, "UGSc", "utun7") in table, "stray default on utun must be left alone"
         assert len(utun()) == 6, utun()
@@ -1979,18 +2046,24 @@ def _e2e_test():
 
         uwrite(CONTROL_FILE, '{"mode": "full", "full_until": null}')  # full: restore
         scutil_ns[0] = ["192.168.1.1"]                                   # ... and this time the VPN pushed no DNS
+        saved_vpn_dns, st.vpn_dns = st.vpn_dns, []                       # simulate a session that pushed none
         evaluate(st, ctx)
         assert len(utun()) == 2 + N_TILES, utun()
         assert ("host", "10.25.8.118") not in dests() and st.applied == set()
         assert json.load(open(STATUS_FILE))["mode"] == "full"
         assert ("192.168.1.1", "192.168.1.1", "UGHS", "en0") in table, "LAN DNS must stay reachable in Full VPN when none was pushed"
+        assert dns_slot[0] == [], "nothing pushed this session: the manual DNS slot is left alone"
         assert "pushed no DNS" in (json.load(open(STATUS_FILE))["note"] or "")
+        st.vpn_dns = saved_vpn_dns                                      # back to the real session: office DNS was pushed
+        evaluate(st, ctx)
+        assert dns_slot[0] == ["10.0.10.16"], ("Full VPN restores the office DNS in the manual slot", dns_slot)
         scutil_ns[0] = ["10.0.10.16", "192.168.1.1"]
 
         uwrite(CONTROL_FILE, '{"mode": "full", "full_until": %f}' % (time.time() - 1))  # expired -> split
         evaluate(st, ctx)
         assert len(utun()) == 6 and ("net", "10.26.0.0/17") in dests(), utun()
         assert ("192.168.1.1", "192.168.1.1", "UGHS", "en0") not in table and st.applied_lan == set(), "LAN DNS route goes away in split"
+        assert dns_slot[0] == [], "back to split: Wi-Fi DNS automatic again"
         assert ("net", "10.50.0.0/16") in {expand(t[0], t[2]) for t in table if t[3] == "utun8"}, "azure route survives mode changes"
         assert open(CONTROL_FILE).read().startswith('{"mode": "full"'), "root must never rewrite control.json"
         assert json.load(open(STATUS_FILE))["mode"] == "split"
@@ -2050,6 +2123,7 @@ def _e2e_test():
         table[:] = [t for t in table if t[3] not in ("utun7", "utun8")]  # both tunnels gone
         evaluate(st, ctx)
         assert HOSTS_BEGIN not in open(HOSTS_FILE).read() and not st.hosts_pinned, "pins must go when the VPN is down"
+        assert st.vpn_dns == [] and st.dns_slot is None, "session DNS memory cleared on disconnect"
     finally:
         lan_resolve = _real_lan_resolve
         sh, log, _fetch_public_ip, STATE_DIR, STATUS_FILE, APPLIED_FILE, BACKUP_DIR, CONF_DIR, ROUTES_FILE, CONTROL_FILE, RESOLVER_DIR = saved

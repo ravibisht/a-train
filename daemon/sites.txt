@@ -1,0 +1,3 @@
+# Check Point sites the installer creates when the client has none (one per line: address  display-name)
+122.160.108.90  PB VPN
+vpn.policybazaar.com  PB VPN (DNS)

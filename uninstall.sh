@@ -13,6 +13,11 @@ if [ -d /etc/resolver ]; then
     [ -f "$f" ] && head -1 "$f" 2>/dev/null | grep -q 'managed by vpnsplitd' && rm -f "$f" && echo "removed resolver $(basename "$f")"
   done
 fi
+# if the daemon had the primary service's manual DNS slot set (Full VPN), return it to automatic
+if [ -f /usr/local/vpn-split/applied.json ]; then
+  svc=$(python3 -c 'import json;d=json.load(open("/usr/local/vpn-split/applied.json"));print(d.get("dns_service") or "" if d.get("dns_slot")=="vpn" else "")' 2>/dev/null)
+  [ -n "$svc" ] && networksetup -setdnsservers "$svc" Empty && echo "DNS for $svc back to automatic"
+fi
 # remove our marked block from /etc/hosts, if present
 if grep -q "# >>> vpnsplitd (via local pins" /etc/hosts 2>/dev/null; then
   sed -i '' '/# >>> vpnsplitd (via local pins/,/# <<< vpnsplitd <<</d' /etc/hosts && echo "removed hosts pins"
