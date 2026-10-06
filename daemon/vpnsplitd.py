@@ -38,7 +38,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 HOME = os.environ.get("VPNSPLIT_HOME") or os.path.expanduser("~/vpn-split")
 CONF_DIR = os.path.join(HOME, "config")
@@ -276,6 +276,20 @@ def primary_service():
         if mm.group(2) == ifn:
             return (mm.group(1).strip(), ifn)
     return None
+
+
+def dhcp_dns(ifn):
+    """DNS servers from the interface's DHCP lease. Unlike `scutil --dns`, this never reflects what a VPN
+    client wrote into the manual slot, so it is the trustworthy LAN baseline."""
+    out = sh(["ipconfig", "getoption", ifn, "domain_name_server"]).stdout
+    res = []
+    for tok in out.replace(",", " ").split():
+        try:
+            if ipaddress.ip_address(tok).version == 4 and tok not in res:
+                res.append(tok)
+        except ValueError:
+            pass
+    return res
 
 
 def set_manual_dns(service, servers):
@@ -1058,9 +1072,16 @@ def evaluate(st, ctx, force_resolve=False):
         cfg_targets |= {("host", ip) for ip in parse_dns_servers(scut, lan_networks(routes))}
         if sweep_stale(cfg_targets, routes, keep_if=None):
             routes = netstat_inet()
-        cur = resolver_servers(scut)
-        if cur and cur != st.lan_dns:
-            st.lan_dns = cur                              # what DNS looks like with no tunnel: the LAN baseline
+        # LAN baseline: the DHCP lease first (a VPN client cannot alter it); the live resolver list only as a
+        # fallback, and never one that still lists this session's VPN-pushed servers (Check Point restores
+        # the slot a moment AFTER its utun vanishes; on 2026-10-06 that polluted the baseline and killed DNS).
+        svc = primary_service()
+        cand = dhcp_dns(svc[1]) if svc else []
+        if not cand:
+            cand = [a for a in resolver_servers(scut) if a not in st.vpn_dns]
+        if cand and cand != st.lan_dns:
+            st.lan_dns = cand
+            log("LAN DNS baseline: %s" % ", ".join(cand))
         if st.hosts_pinned:
             sync_hosts_pins({})                           # the pinned gateway names are only needed while tunneled
             st.hosts_pinned = False
@@ -1935,6 +1956,8 @@ def _e2e_test():
             dns_slot[0] = [] if cmd[3:] == ["Empty"] else cmd[3:]
         elif cmd[0] == "dscacheutil":
             pass
+        elif cmd[0] == "ipconfig":
+            r.stdout = "192.168.1.1\n"
         elif cmd[0] == "scutil":
             # the manual slot (if the daemon wrote one) overrides what the VPN "pushed"
             ns = scutil_ns[0] if dns_slot[0] is None else (dns_slot[0] or ["192.168.1.1"])
@@ -2121,7 +2144,9 @@ def _e2e_test():
             es, err = load_entries()
             assert es == [] and "owned by uid 0" in err, err
         table[:] = [t for t in table if t[3] not in ("utun7", "utun8")]  # both tunnels gone
+        dns_slot[0], scutil_ns[0] = None, ["10.0.10.16", "10.0.10.10"]       # Check Point's DNS still showing while it tears down
         evaluate(st, ctx)
+        assert st.lan_dns == ["192.168.1.1"], ("baseline must come from DHCP, not the lingering VPN DNS", st.lan_dns)
         assert HOSTS_BEGIN not in open(HOSTS_FILE).read() and not st.hosts_pinned, "pins must go when the VPN is down"
         assert st.vpn_dns == [] and st.dns_slot is None, "session DNS memory cleared on disconnect"
     finally:

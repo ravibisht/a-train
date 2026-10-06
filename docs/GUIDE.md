@@ -716,3 +716,10 @@ Also available, `via local` entries (DNS only, never routed): `*.suffix via loca
 pointing at the LAN resolvers; `host via local` pins the host in `/etc/hosts` between `# >>> vpnsplitd`
 markers after resolving it through the LAN DNS. Both stay active in Full VPN and are removed on disconnect
 and by uninstall.sh. The Azure gateway hostname is `scutil --nc show <azure service id>` → RemoteAddress.
+
+Follow-up the same day (1.6.1): the LAN DNS baseline had been learned from `scutil --dns` at the instant Check
+Point disconnected, when its office DNS was still in the slot. The next session then looked like "no DNS
+pushed", no tunnel routes were added for the office resolvers, Azure's 10.0.8/22 route swallowed them, and
+every lookup timed out. The baseline now comes from the DHCP lease (`ipconfig getoption en0
+domain_name_server`), which a VPN client cannot alter; the resolver list is only a fallback and never one
+that still contains the session's pushed servers. Log line: `LAN DNS baseline: …`.
