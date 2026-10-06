@@ -686,3 +686,24 @@ VPN so Check Point pushes its DNS again, and check the Reachability card.
   at most 5). Delete any you do not want.
 - Route a website…: paste an address, its registrable domain becomes a `*.domain` entry.
 - New installs get `private` as the only route entry. Existing routes.conf files are not changed.
+
+## 24. Azure VPN cannot connect while Check Point is up (2026-10-06, daemon 1.5.1)
+
+Symptom: Azure VPN Client sits in "Connecting"; its extension log says `Address resolution failed for
+azuregateway-….vpn.azure.com` every 30 s. The moment Check Point disconnects, Azure connects.
+
+Cause: Check Point sets the office DNS servers (10.0.10.x) as the resolver for the Wi-Fi interface as well
+as globally. Those servers are only reachable inside the Check Point tunnel. Normal lookups work, because
+the daemon routes them through the tunnel. But a network-extension VPN client resolves its gateway name
+*bound to the Wi-Fi interface* to avoid routing into a tunnel, and a Wi-Fi-bound query to 10.0.10.16 goes
+nowhere. Proven with a UDP query bound to en0: office DNS times out, home router answers in 11 ms;
+`dns-sd -i en0 -G v4 www.apple.com` gets no answer at all while Check Point is up.
+
+Fix, two new entry forms, both `via local` (DNS only, never routed):
+- `*.vpn.azure.com via local` writes `/etc/resolver/vpn.azure.com` pointing at the LAN resolvers the
+  daemon learned while no tunnel was up.
+- `azuregateway-….vpn.azure.com via local` resolves that one host through the LAN DNS directly and pins it in
+  `/etc/hosts` between `# >>> vpnsplitd` markers. Hosts entries are consulted before any resolver, scoped or
+  not, so this is the form that is certain to work. Pins are removed on disconnect and by uninstall.sh.
+The gateway hostname is `scutil --nc show <azure service id>` → RemoteAddress. Both forms stay active in
+Full VPN too. The dashboard offers "Local DNS" as a third tunnel choice for *.domain rows.

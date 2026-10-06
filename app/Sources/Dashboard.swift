@@ -177,12 +177,15 @@ struct TunnelSwitch: View {
     let via: String
     let onSelect: (String) -> Void
     var compact = false
+    var allowLocal = false              // *.domain entries can also be "Local": resolved on Wi-Fi DNS, never routed
     static let azure = Color(red: 0.55, green: 0.78, blue: 1.0)
+    static let local = Color(red: 1.0, green: 0.85, blue: 0.55)
     var body: some View {
-        SegmentSwitch(options: [.init(title: "Check Point", tag: "checkpoint", color: Theme.ok),
-                                .init(title: "Azure", tag: "azure", color: TunnelSwitch.azure)],
-                      selected: via, onSelect: onSelect, compact: compact)
-            .help("Which tunnel carries this entry")
+        var opts: [SegmentSwitch.Option] = [.init(title: "Check Point", tag: "checkpoint", color: Theme.ok),
+                                            .init(title: "Azure", tag: "azure", color: TunnelSwitch.azure)]
+        if allowLocal || via == "local" { opts.append(.init(title: "Local DNS", tag: "local", color: TunnelSwitch.local)) }
+        return SegmentSwitch(options: opts, selected: via, onSelect: onSelect, compact: compact)
+            .help(allowLocal ? "Which tunnel carries this entry. Local DNS: the domain resolves on your Wi-Fi DNS and is never routed (other VPN clients' gateways need this)" : "Which tunnel carries this entry")
     }
 }
 
@@ -467,9 +470,11 @@ struct DashboardView: View {
                                         .help(viaTunnel ? "Traffic to this entry goes through the tunnel" : "Traffic to this entry currently goes over \(p), not the VPN")
                                 }
                                 if !e.auto && e.kind != "dns" {
-                                    TunnelSwitch(via: e.via, onSelect: { m.onSetVia(e.raw, $0) }, compact: true)
+                                    TunnelSwitch(via: e.via, onSelect: { m.onSetVia(e.raw, $0) }, compact: true, allowLocal: e.kind == "wildcard")
                                 }
-                                if e.kind == "wildcard" && e.enabled {
+                                if e.kind == "wildcard" && e.enabled && e.via == "local" {
+                                    Text("resolves on Wi-Fi DNS, never routed").font(.system(size: 11)).foregroundColor(Theme.dim)
+                                } else if e.kind == "wildcard" && e.enabled {
                                     Text(e.ipCount == 0 ? "no hosts visited yet" : "routing \(e.ipCount) live host\(e.ipCount == 1 ? "" : "s")")
                                         .font(.system(size: 11)).foregroundColor(Theme.dim)
                                 } else if e.kind == "private" && e.enabled {
@@ -507,7 +512,7 @@ struct DashboardView: View {
             }
             let controls = HStack(spacing: 8) {
                 Text("via").font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
-                TunnelSwitch(via: newVia, onSelect: { newVia = $0 })
+                TunnelSwitch(via: newVia, onSelect: { newVia = $0 }, allowLocal: newEntry.trimmingCharacters(in: .whitespaces).hasPrefix("*."))
                 Button("Add") {
                     let v = newEntry.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                     m.addError = m.onAddEntry(v, newComment.trimmingCharacters(in: .whitespaces), newVia)

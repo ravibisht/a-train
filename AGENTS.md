@@ -66,6 +66,10 @@ Each of these exists because it broke once. Keep them when changing nearby code.
 - **`private` carves out the LAN** (`private_targets`, `lan_carve`): RFC1918 minus every directly connected
   private network, recomputed each evaluate, so the LAN gateway and LAN devices never enter the tunnel.
   Prefixes stay ≥ /8 (`MIN_PREFIX`).
+- **`via local` is DNS-only.** `*.suffix via local` writes a resolver file pointing at the LAN baseline
+  resolvers; `host via local` pins the host in `/etc/hosts` between `HOSTS_BEGIN`/`HOSTS_END` markers after
+  resolving it through the LAN DNS (`lan_resolve`, raw UDP). Neither ever adds a route. Needed because
+  network-extension VPN clients resolve bound to Wi-Fi, where VPN-pushed DNS is unreachable.
 - **Wildcards (`*.suffix`)** work through a loopback DNS forwarder plus `/etc/resolver/<suffix>`; every resolver
   file the daemon writes starts with `# managed by vpnsplitd`, and only files with that marker are removed.
 - **Connecting goes through `CheckPoint.connect`** (`app/Sources/VPN.swift`). A manual connect takes over a

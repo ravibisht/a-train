@@ -13,6 +13,10 @@ if [ -d /etc/resolver ]; then
     [ -f "$f" ] && head -1 "$f" 2>/dev/null | grep -q 'managed by vpnsplitd' && rm -f "$f" && echo "removed resolver $(basename "$f")"
   done
 fi
+# remove our marked block from /etc/hosts, if present
+if grep -q "# >>> vpnsplitd (via local pins" /etc/hosts 2>/dev/null; then
+  sed -i '' '/# >>> vpnsplitd (via local pins/,/# <<< vpnsplitd <<</d' /etc/hosts && echo "removed hosts pins"
+fi
 rm -f /usr/local/vpn-split/vpnsplitd.py /usr/local/vpn-split/status.json /usr/local/vpn-split/status.json.tmp \
       /usr/local/vpn-split/applied.json /usr/local/vpn-split/applied.json.tmp
 echo "removed. backups kept in /usr/local/vpn-split/backups, config kept in ~/vpn-split/config."

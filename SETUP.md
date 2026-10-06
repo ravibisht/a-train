@@ -61,6 +61,7 @@ private                            # every RFC1918 network except the one this M
 db.internal.example.com            # a hostname: resolved every 5 minutes, each IP gets a route
 *.intranet.example.com             # a whole domain: every subdomain you visit is routed as you visit it
 10.50.0.0/16 via azure             # send this one through the Azure VPN client instead
+gw.example.net via local           # DNS only: resolve on Wi-Fi and pin in /etc/hosts (another VPN's gateway)
 #off 10.60.0.0/16                  # kept but disabled (the app's toggle does this)
 ```
 

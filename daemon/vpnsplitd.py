@@ -38,7 +38,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 HOME = os.environ.get("VPNSPLIT_HOME") or os.path.expanduser("~/vpn-split")
 CONF_DIR = os.path.join(HOME, "config")
@@ -50,6 +50,8 @@ APPLIED_FILE = os.path.join(STATE_DIR, "applied.json")
 BACKUP_DIR = os.path.join(STATE_DIR, "backups")
 RESOLVER_DIR = os.environ.get("VPNSPLIT_RESOLVER_DIR") or "/etc/resolver"
 RESOLVER_MARK = "# managed by vpnsplitd"        # only files carrying this are ever touched
+HOSTS_FILE = os.environ.get("VPNSPLIT_HOSTS") or "/etc/hosts"
+HOSTS_BEGIN, HOSTS_END = "# >>> vpnsplitd (via local pins; removed automatically) >>>", "# <<< vpnsplitd <<<"
 DNS_PORT_PREF = 53                              # try loopback :53 first (clean fallback), else a high port
 DNS_PORT_ALT = 55353
 WILDCARD_TTL = 3600                             # forget a discovered wildcard IP unseen this long
@@ -218,6 +220,50 @@ def vpn_dns_servers(routes, exclude=()):
     return parse_dns_servers(sh(["scutil", "--dns"]).stdout, lan_networks(routes), exclude)
 
 
+def lan_resolve(name, servers, timeout=3.0):
+    """A records for `name` asked directly of the LAN resolvers (UDP/53), bypassing the system resolver
+    (which the VPN may have pointed at office servers). Returns [] on failure."""
+    import struct
+    q = b"\x5a\x7e\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+    for label in name.strip(".").split("."):
+        q += bytes([len(label)]) + label.encode()
+    q += b"\x00\x00\x01\x00\x01"
+    for srv in servers[:3]:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(timeout)
+        try:
+            s.sendto(q, (srv, 53))
+            d = s.recv(1024)
+        except (socket.timeout, OSError):
+            continue
+        finally:
+            s.close()
+        if len(d) < 12 or d[:2] != q[:2] or (d[3] & 0x0F) != 0:
+            continue
+        qd, an = struct.unpack("!HH", d[4:8])
+        i = 12
+        for _ in range(qd):                                # skip question
+            while d[i] != 0:
+                i += d[i] + 1
+            i += 5
+        ips = []
+        for _ in range(an):
+            if d[i] & 0xC0 == 0xC0:
+                i += 2
+            else:
+                while d[i] != 0:
+                    i += d[i] + 1
+                i += 1
+            rtype, _, _, rdlen = struct.unpack("!HHIH", d[i:i + 10])
+            i += 10
+            if rtype == 1 and rdlen == 4:
+                ips.append(".".join(str(b) for b in d[i:i + 4]))
+            i += rdlen
+        if ips:
+            return sorted(set(ips))
+    return []
+
+
 def lan_gateway(routes):
     """(gateway, interface) of the internet default route on a non-tunnel interface, or None."""
     for r in routes:
@@ -343,7 +389,7 @@ def route_op(action, kind, target, gw, cmdlog=None, via_if=None):
 
 # ----------------------------------------------------------------------------- config
 
-VIAS = ("checkpoint", "azure")
+VIAS = ("checkpoint", "azure", "local")   # local: resolve on the LAN resolver, never routed (Azure gateway name)
 
 
 class Entry(object):
@@ -357,6 +403,8 @@ class Entry(object):
         self.resolver = None                              # wildcard only: is its /etc/resolver file live
 
     def targets(self):
+        if self.via == "local":
+            return []                                     # DNS-only entry: resolved on the LAN, never routed
         if self.kind == "private":
             return private_targets(_CARVE)
         if self.kind in ("ip", "dns"):
@@ -475,9 +523,14 @@ def parse_routes(text):
         via, tokens = "checkpoint", value.split()
         if len(tokens) == 3 and tokens[1] == "via" and tokens[2] in VIAS:
             value, via = tokens[0], tokens[2]
+            if via == "local" and classify(value) not in ("wildcard", "domain"):
+                e = Entry(value[:60], None, enabled, comment, lineno)
+                e.error = "via local only applies to *.domain or hostname entries (DNS on the LAN resolver, no route)"
+                entries.append(e)
+                continue
         elif len(tokens) != 1:
             e = Entry(value[:60], None, enabled, comment, lineno)
-            e.error = "invalid entry (use: <target> via azure|checkpoint)"
+            e.error = "invalid entry (use: <target> via azure|checkpoint|local)"
             entries.append(e)
             continue
         kind = classify(value)
@@ -612,12 +665,13 @@ class State(object):
         self.applied_az = set()                           # routes we placed on the Azure interface
         self.az_if = None
         self.lan_dns = []                                 # resolvers in use while NO tunnel was up (baseline)
+        self.hosts_pinned = False                         # we currently hold a marked block in /etc/hosts
         self.applied_lan = set()                          # (kind, target, gw): LAN DNS kept reachable in Full VPN
 
     def reset(self):
-        az_if, applied_az, lan_dns = self.az_if, self.applied_az, self.lan_dns   # independent of Check Point's session
+        az_if, applied_az, lan_dns, pinned = self.az_if, self.applied_az, self.lan_dns, self.hosts_pinned
         self.__init__()
-        self.az_if, self.applied_az, self.lan_dns = az_if, applied_az, lan_dns
+        self.az_if, self.applied_az, self.lan_dns, self.hosts_pinned = az_if, applied_az, lan_dns, pinned
 
     @classmethod
     def load(cls):
@@ -632,6 +686,7 @@ class State(object):
             st.az_if = d.get("az_if")
             st.lan_dns = [str(x) for x in d.get("lan_dns", [])]
             st.applied_lan = {tuple(x) for x in d.get("routes_lan", [])}
+            st.hosts_pinned = bool(d.get("hosts_pinned"))
         except (OSError, ValueError, TypeError):
             pass
         return st
@@ -643,7 +698,7 @@ class State(object):
         with open(tmp, "w") as f:
             json.dump({"if": self.ifn, "gw": self.gw, "since": self.since, "backup": self.backup,
                        "routes": sorted(self.applied), "routes_az": sorted(self.applied_az), "az_if": self.az_if,
-                       "lan_dns": self.lan_dns, "routes_lan": sorted(self.applied_lan)}, f)
+                       "lan_dns": self.lan_dns, "routes_lan": sorted(self.applied_lan), "hosts_pinned": self.hosts_pinned}, f)
         os.replace(tmp, APPLIED_FILE)
 
 
@@ -931,7 +986,7 @@ def evaluate(st, ctx, force_resolve=False):
 
     # ---- Azure tunnel (independent of Check Point): entries tagged "via azure" ride its interface
     az = find_azure(routes, exclude_if=tun[0] if tun else None)
-    wild_via = {e.suffix: e.via for e in entries if e.kind == "wildcard" and e.enabled}
+    wild_via = {e.suffix: e.via for e in entries if e.kind == "wildcard" and e.enabled and e.via != "local"}
     if az:
         az_if, az_addr = az
         if st.az_if != az_if:
@@ -972,6 +1027,9 @@ def evaluate(st, ctx, force_resolve=False):
         cur = resolver_servers(scut)
         if cur and cur != st.lan_dns:
             st.lan_dns = cur                              # what DNS looks like with no tunnel: the LAN baseline
+        if st.hosts_pinned:
+            sync_hosts_pins({})                           # the pinned gateway names are only needed while tunneled
+            st.hosts_pinned = False
         st.save()
         remove_all_resolvers()                            # let company domains resolve normally off-VPN
         forget_disabled_suffixes(set())
@@ -1008,7 +1066,9 @@ def evaluate(st, ctx, force_resolve=False):
     scut = sh(["scutil", "--dns"]).stdout                # before stripping, while scutil still shows them
     dns = parse_dns_servers(scut, lan_networks(routes), exclude=st.lan_dns)
     cur_dns = resolver_servers(scut)
-    wildcard_suffixes = {e.suffix for e in entries if e.kind == "wildcard" and e.enabled}
+    wildcard_suffixes = {e.suffix for e in entries if e.kind == "wildcard" and e.enabled and e.via != "local"}
+    local_suffixes = {e.suffix for e in entries if e.kind == "wildcard" and e.enabled and e.via == "local"}
+    lan_dns = st.lan_dns or [a for a in cur_dns if a not in dns]
     forget_disabled_suffixes(wildcard_suffixes)
     prune_dynamic()
     with _fwd_lock:
@@ -1017,9 +1077,23 @@ def evaluate(st, ctx, force_resolve=False):
         _fwd["upstream"] = upstream
         _fwd["suffixes"] = wildcard_suffixes
         fwd_port = _fwd["port"]
-    live_suffixes = sync_resolvers(wildcard_suffixes, fwd_port, dns) if mode == "split" else set()
-    if mode != "split":
-        remove_all_resolvers()                            # in full mode everything is tunneled; step aside
+    local_hosts = [e for e in entries if e.kind == "domain" and e.enabled and e.via == "local"]
+    pins = {}
+    for e in local_hosts:
+        ips = lan_resolve(e.raw, lan_dns)
+        if ips:
+            e.ips, e.applied, e.error = ips, True, None
+            pins[e.raw] = ips
+        else:
+            e.ips, e.applied = [], False
+            e.error = "could not resolve via the LAN DNS (%s)" % (", ".join(lan_dns) or "none known yet")
+    if local_hosts or st.hosts_pinned:
+        st.hosts_pinned = bool(pins) and sync_hosts_pins(pins)
+    if mode == "split":
+        live_suffixes = sync_resolvers(wildcard_suffixes, fwd_port, dns, local=local_suffixes, local_dns=lan_dns)
+    else:
+        # full mode: everything is tunneled, the forwarder steps aside; LAN-resolved names still need it
+        live_suffixes = sync_resolvers(set(), fwd_port, dns, local=local_suffixes, local_dns=lan_dns)
 
     if mode == "split":
         if st.applied_lan:
@@ -1038,11 +1112,15 @@ def evaluate(st, ctx, force_resolve=False):
         if not dns and wildcard_suffixes:
             note = ("The VPN pushed no DNS servers this session, so names that exist only on the office DNS "
                     "(%s) will not resolve. Disconnect and reconnect the VPN if you need them." % ", ".join(sorted(wildcard_suffixes)))
-        resolve_domains(entries, force_resolve)
+        resolve_domains([e for e in entries if e.via != "local"], force_resolve)
         for e in entries:
             if e.kind == "private":
                 e.ips = [t[1] for t in e.targets()]
-            if e.kind == "wildcard":
+            if e.kind == "wildcard" and e.via == "local":
+                e.ips = []
+                e.resolver = e.suffix in live_suffixes
+                e.error = None if e.resolver else "no LAN DNS known yet: connect once without the VPN so the daemon learns it"
+            elif e.kind == "wildcard":
                 e.ips = sorted(_dynamic.get(e.suffix, {}))
                 e.resolver = e.suffix in live_suffixes
                 e.error = None if e.resolver else ("resolver not installed" if fwd_port else "DNS forwarder not running")
@@ -1418,9 +1496,13 @@ class DNSForwarder(object):
         return bytes(b) + query[12:]
 
 
-def sync_resolvers(suffixes, port, fallback):
-    """Make RESOLVER_DIR hold exactly one marked file per enabled wildcard suffix, pointing macOS at
-    our forwarder. Only ever create/delete files carrying RESOLVER_MARK. Returns set of live suffixes."""
+def sync_resolvers(suffixes, port, fallback, local=(), local_dns=()):
+    """Make RESOLVER_DIR hold exactly one marked file per enabled wildcard suffix: forwarder-backed
+    suffixes point macOS at our forwarder; `local` suffixes point at the LAN resolvers (`local_dns`).
+    The local kind exists because some clients resolve bound to the Wi-Fi interface (Azure VPN's
+    extension does), where the VPN-pushed office DNS is unreachable; a per-domain resolver file is
+    honoured for scoped lookups too. Only files carrying RESOLVER_MARK are ever created or deleted.
+    Returns the set of live suffixes."""
     if port is None:
         suffixes = set()                                 # forwarder not listening: install nothing
     try:
@@ -1437,6 +1519,10 @@ def sync_resolvers(suffixes, port, fallback):
         else:
             lines.append("port %d" % port)
         want[s] = "\n".join(lines) + "\n"
+    for s in local:
+        if not local_dns:
+            continue                                     # no LAN baseline yet (daemon started with the VPN up)
+        want[s] = "\n".join([RESOLVER_MARK] + ["nameserver %s" % a for a in local_dns[:3]]) + "\n"
     live = set()
     # remove our stale files
     for name in os.listdir(RESOLVER_DIR):
@@ -1464,11 +1550,50 @@ def sync_resolvers(suffixes, port, fallback):
                 with open(tmp, "w") as f:
                     f.write(text)
                 os.replace(tmp, p)
-                log("resolver for %s -> 127.0.0.1:%d" % (s, port))
+                log("resolver for %s -> %s" % (s, "LAN DNS " + ", ".join(local_dns[:3]) if s in local else "127.0.0.1:%d" % port))
             live.add(s)
         except OSError as e:
             log("resolver for %s: %s" % (s, e))
     return live
+
+
+def sync_hosts_pins(pins):
+    """Pin `hostname via local` entries in HOSTS_FILE between our markers: {name: [ips]}. /etc/hosts is
+    consulted before any resolver, scoped or not, so a client that resolves bound to Wi-Fi (Azure VPN's
+    extension) finds its gateway even while the VPN-pushed office DNS is unreachable there.
+    Only the marked block is ever written or removed."""
+    try:
+        text = open(HOSTS_FILE).read()
+    except OSError as e:
+        log("hosts file %s: %s" % (HOSTS_FILE, e))
+        return False
+    lines = text.split("\n")
+    if HOSTS_BEGIN in lines and HOSTS_END in lines:
+        a, b = lines.index(HOSTS_BEGIN), lines.index(HOSTS_END)
+        lines = lines[:a] + lines[b + 1:]
+    while lines and lines[-1] == "":
+        lines.pop()
+    block = []
+    for name in sorted(pins):
+        for ip in pins[name]:
+            block.append("%s\t%s" % (ip, name))
+    if block:
+        lines += [HOSTS_BEGIN] + block + [HOSTS_END]
+    new = "\n".join(lines) + "\n"
+    if new == text:
+        return True
+    try:
+        tmp = HOSTS_FILE + ".vpnsplitd.tmp"
+        with open(tmp, "w") as f:
+            f.write(new)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, HOSTS_FILE)
+        log("hosts pins: %s" % (", ".join("%s=%s" % (n, ",".join(pins[n])) for n in sorted(pins)) or "cleared"))
+        sh(["dscacheutil", "-flushcache"])
+        return True
+    except OSError as e:
+        log("hosts file %s: %s" % (HOSTS_FILE, e))
+        return False
 
 
 def remove_all_resolvers():
@@ -1681,7 +1806,7 @@ def _e2e_test():
     split strips the tiling but leaves a stray 'default' alone, adds desired + DNS routes, refuses a
     /0 entry; full mode restores; an expired timer strips again; stale backups and symlinked config
     files are rejected."""
-    global sh, log, _fetch_public_ip, STATE_DIR, STATUS_FILE, APPLIED_FILE, BACKUP_DIR, CONF_DIR, ROUTES_FILE, CONTROL_FILE, RESOLVER_DIR
+    global sh, log, _fetch_public_ip, STATE_DIR, STATUS_FILE, APPLIED_FILE, BACKUP_DIR, CONF_DIR, ROUTES_FILE, CONTROL_FILE, RESOLVER_DIR, HOSTS_FILE, lan_resolve
     import shutil
     import tempfile
     saved = (sh, log, _fetch_public_ip, STATE_DIR, STATUS_FILE, APPLIED_FILE, BACKUP_DIR, CONF_DIR, ROUTES_FILE, CONTROL_FILE, RESOLVER_DIR)
@@ -1691,6 +1816,10 @@ def _e2e_test():
     CONF_DIR = os.path.join(tmp, "config")
     ROUTES_FILE, CONTROL_FILE = CONF_DIR + "/routes.conf", CONF_DIR + "/control.json"
     RESOLVER_DIR = os.path.join(tmp, "resolver")
+    HOSTS_FILE = os.path.join(tmp, "hosts")
+    open(HOSTS_FILE, "w").write("127.0.0.1\tlocalhost\n")
+    _real_lan_resolve = lan_resolve
+    lan_resolve = lambda name, servers, timeout=3.0: (["74.162.102.187"] if name.startswith("azuregateway-") and servers else [])
     os.makedirs(BACKUP_DIR)
     os.makedirs(CONF_DIR)
     os.makedirs(RESOLVER_DIR)
@@ -1867,8 +1996,30 @@ def _e2e_test():
         assert json.load(open(STATUS_FILE))["mode"] == "split"
 
         # zero-config: `private` routes every RFC1918 range except the LAN (192.168.1/24 in the fake table)
-        uwrite(ROUTES_FILE, "private   # all internal networks\n")
+        uwrite(ROUTES_FILE, "private   # all internal networks\n*.vpn.azure.com via local  # resolve on Wi-Fi\n10.9.9.9 via local  # invalid\n"
+                            "azuregateway-abc.vpn.azure.com via local  # pinned in hosts\n")
         ctx.entries, ctx.conf_error = load_entries()
+        assert ctx.entries[1].via == "local" and ctx.entries[1].kind == "wildcard" and ctx.entries[1].targets() == []
+        assert ctx.entries[2].kind is None and "via local only" in ctx.entries[2].error
+        assert ctx.entries[3].kind == "domain" and ctx.entries[3].via == "local" and ctx.entries[3].targets() == []
+        st.lan_dns = ["192.168.1.1"]                                    # baseline learned while no tunnel was up
+        before = len(utun())
+        evaluate(st, ctx)
+        rf = os.path.join(RESOLVER_DIR, "vpn.azure.com")
+        assert os.path.exists(rf) and open(rf).read() == RESOLVER_MARK + "\nnameserver 192.168.1.1\n", "local resolver file"
+        st_l = [e for e in json.load(open(STATUS_FILE))["entries"] if e["raw"] == "*.vpn.azure.com"][0]
+        assert st_l["resolver"] is True and st_l["error"] is None and st_l["via"] == "local", st_l
+        hosts = open(HOSTS_FILE).read()
+        assert "74.162.102.187\tazuregateway-abc.vpn.azure.com" in hosts and hosts.startswith("127.0.0.1\tlocalhost"), hosts
+        assert HOSTS_BEGIN in hosts and HOSTS_END in hosts and st.hosts_pinned
+        assert not any(t[1] == "74.162.102.187" for t in dests()), "pinned host must not get a route"
+        st_h = [e for e in json.load(open(STATUS_FILE))["entries"] if e["raw"] == "azuregateway-abc.vpn.azure.com"][0]
+        assert st_h["applied"] is True and st_h["ips"] == ["74.162.102.187"], st_h
+        uwrite(CONTROL_FILE, '{"mode": "full", "full_until": null}')
+        evaluate(st, ctx)
+        assert os.path.exists(rf), "LAN-resolved names keep their resolver file in Full VPN"
+        assert not os.path.exists(os.path.join(RESOLVER_DIR, "example.com")), "forwarder resolver files step aside in Full VPN"
+        uwrite(CONTROL_FILE, '{"mode": "split", "full_until": null}')
         evaluate(st, ctx)
         pd = dests()
         pnets = [ipaddress.ip_network(t[1]) for t in pd if t[0] == "net" and t[1] != "0.0.0.0/0"]
@@ -1896,7 +2047,11 @@ def _e2e_test():
             _write(ROUTES_FILE, "10.26.0.0/16\n")
             es, err = load_entries()
             assert es == [] and "owned by uid 0" in err, err
+        table[:] = [t for t in table if t[3] not in ("utun7", "utun8")]  # both tunnels gone
+        evaluate(st, ctx)
+        assert HOSTS_BEGIN not in open(HOSTS_FILE).read() and not st.hosts_pinned, "pins must go when the VPN is down"
     finally:
+        lan_resolve = _real_lan_resolve
         sh, log, _fetch_public_ip, STATE_DIR, STATUS_FILE, APPLIED_FILE, BACKUP_DIR, CONF_DIR, ROUTES_FILE, CONTROL_FILE, RESOLVER_DIR = saved
         shutil.rmtree(tmp, ignore_errors=True)
 

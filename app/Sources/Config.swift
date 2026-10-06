@@ -16,12 +16,14 @@ struct RoutesFile {
     #   10.25.8.118               a single IP
     #   db.internal.example.com   a domain name: resolved every 5 minutes, every IP it returns gets a route
     #   *.example.com             a WHOLE domain: any subdomain you visit is routed via the VPN automatically
+    #   *.vpn.azure.com via local resolve a domain on your Wi-Fi DNS, never route it (other VPN clients need this)
     #
     # Anything after # on a line is a comment.
     # Put "#off " in front of an entry to disable it without deleting it (the A-Train toggle does this).
     # Changes are picked up automatically within a couple of seconds while the VPN is connected.
 
     private    # zero-config default: all internal networks, your own LAN stays local
+    *.vpn.azure.com via local   # Azure VPN gateway name: resolve on Wi-Fi, never through the office DNS
 
     """
 
@@ -63,7 +65,7 @@ struct RoutesFile {
             .first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
         var via = "checkpoint"
         let toks = value.split(separator: " ").map(String.init)
-        if toks.count == 3, toks[1].lowercased() == "via", ["azure", "checkpoint"].contains(toks[2].lowercased()) {
+        if toks.count == 3, toks[1].lowercased() == "via", ["azure", "checkpoint", "local"].contains(toks[2].lowercased()) {
             value = toks[0]; via = toks[2].lowercased()
         }
         return value.isEmpty ? nil : (value.lowercased(), enabled, via)
@@ -105,7 +107,7 @@ struct RoutesFile {
     func append(_ value: String, comment: String, via: String = "checkpoint") -> String? {
         var text = read()
         if !text.isEmpty && !text.hasSuffix("\n") { text += "\n" }
-        let v = via == "azure" ? "\(value) via azure" : value
+        let v = via == "checkpoint" ? value : "\(value) via \(via)"
         text += comment.isEmpty ? "\(v)\n" : "\(v)    # \(comment)\n"
         return write(text)
     }
@@ -125,7 +127,7 @@ struct RoutesFile {
                 if let h = body.firstIndex(of: "#") { comment = String(body[body.index(after: h)...]).trimmingCharacters(in: .whitespaces) }
             }
             _ = hash
-            let v = via == "azure" ? "\(value) via azure" : value
+            let v = via == "checkpoint" ? value : "\(value) via \(via)"
             let line = comment.isEmpty ? v : "\(v)    # \(comment)"
             lines[i] = p.enabled ? line : "#off " + line
             found = true
