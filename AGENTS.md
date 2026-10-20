@@ -71,6 +71,9 @@ Each of these exists because it broke once. Keep them when changing nearby code.
   mode the daemon remembers them (`State.vpn_dns`), clears the slot to automatic (`set_manual_dns`),
   and serves company domains through the wildcard forwarder; Full VPN writes them back. Attribution of
   pushed DNS happens once per session, since the slot no longer shows them after clearing.
+  **Only non-tunnel resolver blocks count** (`resolver_servers`): the Azure client's extension inserts its own
+  utun-scoped resolver as block #1; reading it as Check Point's routed Azure's DNS into the wrong tunnel and
+  rewrote the DNS slot every pass.
 - **`via local` is DNS-only.** `*.suffix via local` writes a resolver file pointing at the LAN baseline
   resolvers; `host via local` pins the host in `/etc/hosts` between `HOSTS_BEGIN`/`HOSTS_END` markers after
   resolving it through the LAN DNS (`lan_resolve`, raw UDP). Neither ever adds a route. Needed because

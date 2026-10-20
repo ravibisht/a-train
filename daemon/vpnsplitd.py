@@ -38,7 +38,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 HOME = os.environ.get("VPNSPLIT_HOME") or os.path.expanduser("~/vpn-split")
 CONF_DIR = os.path.join(HOME, "config")
@@ -184,16 +184,25 @@ def lan_networks(routes):
 
 
 def resolver_servers(scutil_out):
-    """All IPv4 nameservers of the default resolver (block #1), in order."""
-    servers = []
-    seen_first = False
+    """All IPv4 nameservers of the default resolver, in order: the first unscoped block that is not bound to
+    a tunnel interface. Network-extension VPN clients (Azure VPN Client) insert their own resolver as block #1,
+    scoped to their utun and flagged Supplemental; that is their DNS, not the primary service's, and treating
+    it as Check Point's routed it into the wrong tunnel and rewrote the manual DNS slot every pass (2026-10-20)."""
+    blocks, cur = [], None
     for line in scutil_out.splitlines():
         s = line.strip()
+        if s.startswith("DNS configuration (for scoped"):
+            break                                         # the scoped section repeats everything per interface
         if s.startswith("resolver #"):
-            if seen_first:
-                break                                     # only the first (default) resolver block
-            seen_first = True
+            cur = {"servers": [], "tunnel": False, "domain": False}
+            blocks.append(cur)
             continue
+        if cur is None:
+            continue
+        if s.startswith("domain"):
+            cur["domain"] = True                          # a per-domain block (mDNS .local etc.), not the default
+        elif re.match(r"if_index\s*:\s*\d+\s*\((utun|ppp|ipsec)", s):
+            cur["tunnel"] = True
         m = re.match(r"nameserver\[\d+\]\s*:\s*(\S+)", s)
         if not m:
             continue
@@ -201,9 +210,12 @@ def resolver_servers(scutil_out):
             a = ipaddress.ip_address(m.group(1))
         except ValueError:
             continue
-        if a.version == 4 and str(a) not in servers:
-            servers.append(str(a))
-    return servers
+        if a.version == 4 and str(a) not in cur["servers"]:
+            cur["servers"].append(str(a))
+    for b in blocks:
+        if not b["tunnel"] and not b["domain"]:
+            return b["servers"]                           # the default resolver (possibly empty)
+    return []
 
 
 def parse_dns_servers(scutil_out, lan, exclude=()):
@@ -1841,6 +1853,13 @@ def self_test():
     assert lan_gateway([Route("default", "10.20.96.1", "UGScg", "en0"), Route("default", "link#24", "UCSIg", "utun7")]) == ("10.20.96.1", "en0")
     assert lan_gateway([Route("default", "link#24", "UCSIg", "utun7")]) is None
     assert parse_dns_servers("resolver #1\n  nameserver[0] : 192.168.1.1\n", lan) == []
+    # The Azure VPN Client's extension inserts its own resolver as block #1, scoped to its utun (Supplemental).
+    # It is Azure's DNS, not Check Point's: never attribute it to the VPN, never route it via the tunnel.
+    azure = ("DNS configuration\n\nresolver #1\n  search domain[0] : etisalat-gateway\n  nameserver[0] : 10.234.1.148\n"
+             "  if_index : 24 (utun8)\n  flags    : Supplemental, Request A records\n\n"
+             "resolver #2\n  nameserver[0] : 10.0.10.16\n  nameserver[1] : 192.168.1.1\n  if_index : 11 (en0)\n")
+    assert resolver_servers(azure) == ["10.0.10.16", "192.168.1.1"], resolver_servers(azure)
+    assert parse_dns_servers(azure, lan) == ["10.0.10.16"], parse_dns_servers(azure, lan)
     d = dns_entries(["10.0.10.16"])[0]
     assert d.kind == "dns" and d.auto and d.targets() == [("host", "10.0.10.16")]
     # tiling detection: many of OUR routes must not look like hub-mode tiling (the flapping bug)
@@ -1941,6 +1960,8 @@ def _e2e_test():
 
     scutil_ns = [["10.0.10.16", "192.168.1.1"]]          # mutable so phases can change what the VPN "pushed"
     dns_slot = [None]                                      # what networksetup -setdnsservers last wrote (None = untouched)
+    az_dns = [None]                                        # Azure's own resolver (utun8-scoped block #1) when its client is up
+    dns_writes = [0]                                       # how many times the daemon wrote the manual slot
 
     def fake_sh(cmd, stdin=None):
         r = R()
@@ -1954,6 +1975,7 @@ def _e2e_test():
         elif cmd[0] == "networksetup" and cmd[1] == "-setdnsservers":
             assert cmd[2] == "Wi-Fi", cmd
             dns_slot[0] = [] if cmd[3:] == ["Empty"] else cmd[3:]
+            dns_writes[0] += 1
         elif cmd[0] == "dscacheutil":
             pass
         elif cmd[0] == "ipconfig":
@@ -1961,7 +1983,8 @@ def _e2e_test():
         elif cmd[0] == "scutil":
             # the manual slot (if the daemon wrote one) overrides what the VPN "pushed"
             ns = scutil_ns[0] if dns_slot[0] is None else (dns_slot[0] or ["192.168.1.1"])
-            r.stdout = "DNS configuration\n\nresolver #1\n" + "".join("  nameserver[%d] : %s\n" % (i, a) for i, a in enumerate(ns))
+            az = "resolver #1\n  nameserver[0] : %s\n  if_index : 30 (utun8)\n  flags    : Supplemental, Request A records\n\n" % az_dns[0] if az_dns[0] else ""
+            r.stdout = "DNS configuration\n\n" + az + "resolver #2\n" + "".join("  nameserver[%d] : %s\n" % (i, a) for i, a in enumerate(ns)) + "  if_index : 11 (en0)\n"
         elif cmd[0] == "ifconfig":
             r.stdout = "utun8: flags=8051 mtu 1500\n\tinet 10.229.0.130 --> 10.229.0.130 netmask 0xffffff80\n" if cmd[1] == "utun8" else "utun7: inet 10.0.203.60 --> 10.0.203.59\n"
         elif cmd[0] == "route":
@@ -2017,7 +2040,14 @@ def _e2e_test():
         table.append(("172.21.0.0/16", "10.9.9.1", "UGSc", "en5"))         # same peer gw parked on USB-Ethernet: dead
         assert {t for t, _ in dead_gateway_routes([Route(*x) for x in table])} == \
             {("net", "10.26.0.0/17"), ("host", "10.0.10.16"), ("host", "10.80.20.180"), ("net", "172.21.0.0/16")}
+        az_dns[0] = "10.234.1.148"                                  # Azure's client pushes its own DNS (2026-10-20)
         evaluate(st, ctx, True)                                     # split
+        d = dests()
+        assert st.vpn_dns == ["10.0.10.16"], ("Azure's resolver is not Check Point's", st.vpn_dns)
+        assert ("host", "10.234.1.148") not in d, "Azure's DNS must never be routed via Check Point"
+        writes = dns_writes[0]
+        evaluate(st, ctx, True); evaluate(st, ctx, True)
+        assert dns_writes[0] == writes, "manual DNS slot rewritten every pass (networksetup loop)"
         d = dests()
         assert not any(t[3] == "en0" and t[1] == "10.0.202.181" for t in table), "stale en0 routes must be swept: %r" % [t for t in table if t[3] == "en0"]
         assert ("10.0.0.0/8", "192.168.1.1", "UGSc", "en0") in table, "on-link gateway routes must be kept"

@@ -723,3 +723,26 @@ pushed", no tunnel routes were added for the office resolvers, Azure's 10.0.8/22
 every lookup timed out. The baseline now comes from the DHCP lease (`ipconfig getoption en0
 domain_name_server`), which a VPN client cannot alter; the resolver list is only a fallback and never one
 that still contains the session's pushed servers. Log line: `LAN DNS baseline: …`.
+
+## 25. Both VPNs up: internet slows down, APIs fail (2026-10-20, daemon 1.6.2)
+
+Symptom: with Check Point and the Azure VPN Client connected at the same time, name lookups crawl, company
+APIs time out and the daemon log fills with `Wi-Fi DNS: automatic (office DNS 10.234.1.148 kept …)` several
+times a second (10,000 lines in 15 minutes, log rotated for size).
+
+Cause: the Azure client's extension inserts **its own resolver** (10.234.1.148, utun8-scoped, flagged
+Supplemental) as block #1 of `scutil --dns`. The daemon read only block #1 as "the resolver the VPN pushed",
+so Azure's DNS replaced Check Point's office DNS in the session memory. Three things followed: the office
+resolvers (10.0.10.x) lost their tunnel routes and were swallowed by Azure's 10.0.8/22 route; 10.234.1.148
+was routed via Check Point's utun, so Azure's DNS went into the wrong tunnel and every lookup (Azure's
+block is first for everything) timed out before falling back to the LAN router; and since Azure's block
+stays in place no matter what the manual slot says, the daemon rewrote the Wi-Fi DNS slot and flushed the
+DNS cache on every pass, each write raising a network-configuration event that triggered the next pass.
+
+Fix: `resolver_servers` skips resolver blocks bound to a tunnel interface (`if_index … (utunN)`) and
+per-domain blocks, and takes the first remaining one as the default resolver. Azure's DNS is never
+attributed to Check Point, never routed, and the manual slot is written once per mode change. Self-test
+covers the Azure-first `scutil --dns` layout and asserts the slot is not rewritten on repeated passes.
+
+Not changed, worth knowing: Azure also adds host routes for 8.8.8.8 and 8.8.4.4 through its tunnel. In the
+office, where the DHCP DNS is 8.8.8.8, every public lookup goes through Azure while it is connected.
