@@ -308,8 +308,31 @@ struct AzureVPN {
         let id: String
         let name: String
         let state: String          // Connected, Disconnected, Connecting, Disconnecting
+        var tunnel = true          // false = "Connected" with no tunnel interface (see hasTunnel)
         var connected: Bool { state == "Connected" }
         var busy: Bool { state == "Connecting" || state == "Disconnecting" }
+        var ghost: Bool { connected && !tunnel }
+    }
+
+    /// Whether a "Connected" service really has a tunnel. The Azure extension reaches its gateway on a
+    /// socket bound to Wi-Fi; while Check Point's full-tunnel routes are in the table every such socket
+    /// fails ("Network is unreachable"), yet the extension still reports Connected, with no interface,
+    /// address, routes or DNS, and it never recovers by itself. A real connection always lists its utun.
+    static func hasTunnel(_ id: String) -> Bool {
+        statusHasTunnel(CheckPoint.run("/usr/sbin/scutil", ["--nc", "status", id], timeout: 10).output)
+    }
+
+    /// Pure parser for `scutil --nc status <id>`.
+    static func statusHasTunnel(_ out: String) -> Bool {
+        out.range(of: #"InterfaceName\s*:\s*\S+"#, options: .regularExpression) != nil
+    }
+
+    /// Stop, then start again: the only thing that turns a tunnel-less "Connected" into a real connection.
+    static func restart(_ id: String) -> String {
+        _ = stop(id)
+        _ = waitFor(id, connected: false, seconds: 15)
+        if case .failure = start(id) { return "Disconnected" }
+        return waitFor(id, connected: true, seconds: 40)
     }
 
     /// Parse `scutil --nc list`; profiles get renamed/re-created, so discover every poll, never cache IDs.
@@ -326,7 +349,9 @@ struct AzureVPN {
             if let q1 = line.range(of: "\""), let q2 = line.range(of: "\"", range: q1.upperBound..<line.endIndex) {
                 name = String(line[q1.upperBound..<q2.lowerBound])
             }
-            if !id.isEmpty { out.append(Service(id: id, name: name, state: state)) }
+            if !id.isEmpty {
+                out.append(Service(id: id, name: name, state: state, tunnel: state != "Connected" || hasTunnel(id)))
+            }
         }
         return out
     }

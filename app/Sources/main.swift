@@ -427,6 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 self.dropNotice(from: old, to: i)
                 if i.connected { VPNPrefs.failures = 0; self.lastVPNError = nil; self.transientNote = nil }
                 self.unstickIfNeeded(i)
+                self.azureHealTick()
                 self.autoConnectTick()
             }
         }
@@ -596,7 +597,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var azureLine: String {
         guard let a = azureService else { return "Azure VPN: no profile yet" }
         if azureBusy == a.id { return "Azure VPN: working… (\(a.name))" }
+        if a.ghost { return "Azure VPN: says connected, but has no tunnel · \(a.name)" }
         return "Azure VPN: \(a.state) · \(a.name)"
+    }
+
+    /// Check Point's full-tunnel routes are in the table right now (Full VPN, the seconds before the daemon
+    /// strips them, or no daemon at all). Azure cannot reach its gateway while they are there.
+    private func checkPointBlocksAzure() -> Bool {
+        guard vpn.connected else { return false }
+        guard let s = DaemonStatus.load(from: statusPath), !s.isStale else { return true }
+        return s.tiling ?? false
+    }
+
+    /// Azure started while Check Point's routes were still in place stays "Connected" without a tunnel for
+    /// good. Once the routes are gone, restart it; at most twice in ten minutes, and never while they remain.
+    private var azureGhostSince: Date?
+    private var azureHeals: [Date] = []
+
+    private func azureHealTick() {
+        guard let a = azureService, a.ghost, azureBusy == nil else { azureGhostSince = nil; return }
+        if azureGhostSince == nil { azureGhostSince = Date(); return }
+        azureHeals.removeAll { Date().timeIntervalSince($0) > 600 }
+        guard Date().timeIntervalSince(azureGhostSince!) >= 8, azureHeals.count < 2, !checkPointBlocksAzure() else { return }
+        azureHeals.append(Date())
+        azureGhostSince = nil
+        azureBusy = a.id
+        DispatchQueue.global(qos: .userInitiated).async {
+            let state = AzureVPN.restart(a.id)
+            let ok = state == "Connected" && AzureVPN.hasTunnel(a.id)
+            DispatchQueue.main.async {
+                self.azureBusy = nil
+                Notify.shared.post(id: "azure-heal", title: ok ? "Azure VPN reconnected" : "Azure VPN has no tunnel",
+                                     body: ok ? "It had started while Check Point was still taking over the network, so it showed Connected without a tunnel. A-Train restarted it."
+                                              : "It shows Connected but carries no traffic, and a restart did not help. Disconnect and connect it again.")
+                self.pollVPN(force: true)
+            }
+        }
     }
 
     @objc private func connectAzure() { azureAction(start: true) }
@@ -606,11 +642,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard let a = azureService, azureBusy == nil else { return }
         azureBusy = a.id
         DispatchQueue.global(qos: .userInitiated).async {
+            if start {                                    // let the daemon strip Check Point's routes first
+                var waited = 0
+                while waited < 30, self.checkPointBlocksAzure() { Thread.sleep(forTimeInterval: 1); waited += 1 }
+            }
             let r = start ? AzureVPN.start(a.id) : AzureVPN.stop(a.id)
             var finalState = ""
             if case .success = r { finalState = AzureVPN.waitFor(a.id, connected: start, seconds: start ? 40 : 15) }
+            var noTunnel = false
+            if start, finalState == "Connected", !AzureVPN.hasTunnel(a.id) {
+                if !self.checkPointBlocksAzure() { finalState = AzureVPN.restart(a.id) }
+                noTunnel = finalState == "Connected" && !AzureVPN.hasTunnel(a.id)
+            }
             DispatchQueue.main.async {
                 self.azureBusy = nil
+                if noTunnel {
+                    self.showError("Azure VPN says Connected but has no tunnel. Check Point's full tunnel is blocking it: Azure cannot connect while Check Point is in Full VPN (or while the A-Train daemon is not running). Switch to Split, then connect Azure again.")
+                    _ = AzureVPN.stop(a.id)
+                    self.pollVPN(force: true)
+                    return
+                }
                 switch r {
                 case .failure(let msg):
                     self.showError("Azure VPN could not \(start ? "connect" : "disconnect"): \(msg)")

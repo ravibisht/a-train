@@ -38,7 +38,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 
 HOME = os.environ.get("VPNSPLIT_HOME") or os.path.expanduser("~/vpn-split")
 CONF_DIR = os.path.join(HOME, "config")
@@ -293,7 +293,10 @@ def primary_service():
 def dhcp_dns(ifn):
     """DNS servers from the interface's DHCP lease. Unlike `scutil --dns`, this never reflects what a VPN
     client wrote into the manual slot, so it is the trustworthy LAN baseline."""
-    out = sh(["ipconfig", "getoption", ifn, "domain_name_server"]).stdout
+    m = re.search(r"^domain_name_server \([^)]*\):\s*\{?([^}\n]*)", sh(["ipconfig", "getpacket", ifn]).stdout, re.M)
+    # `getoption` prints only the first server of the option. An office lease lists several, and some
+    # are the same servers the VPN pushes; missing them from the baseline made them look VPN-pushed.
+    out = m.group(1) if m else sh(["ipconfig", "getoption", ifn, "domain_name_server"]).stdout
     res = []
     for tok in out.replace(",", " ").split():
         try:
@@ -1962,6 +1965,7 @@ def _e2e_test():
     dns_slot = [None]                                      # what networksetup -setdnsservers last wrote (None = untouched)
     az_dns = [None]                                        # Azure's own resolver (utun8-scoped block #1) when its client is up
     dns_writes = [0]                                       # how many times the daemon wrote the manual slot
+    dhcp_ns = [["192.168.1.1"]]                            # DNS servers in the Wi-Fi DHCP lease
 
     def fake_sh(cmd, stdin=None):
         r = R()
@@ -1978,8 +1982,9 @@ def _e2e_test():
             dns_writes[0] += 1
         elif cmd[0] == "dscacheutil":
             pass
-        elif cmd[0] == "ipconfig":
-            r.stdout = "192.168.1.1\n"
+        elif cmd[0] == "ipconfig":                         # like the real tool: getoption prints only the FIRST server
+            r.stdout = (dhcp_ns[0][0] + "\n") if cmd[1] == "getoption" else \
+                       "op = BOOTREPLY\nrouter (ip_mult): {192.168.1.1}\ndomain_name_server (ip_mult): {%s}\nend (none):\n" % ", ".join(dhcp_ns[0])
         elif cmd[0] == "scutil":
             # the manual slot (if the daemon wrote one) overrides what the VPN "pushed"
             ns = scutil_ns[0] if dns_slot[0] is None else (dns_slot[0] or ["192.168.1.1"])
@@ -2179,6 +2184,32 @@ def _e2e_test():
         assert st.lan_dns == ["192.168.1.1"], ("baseline must come from DHCP, not the lingering VPN DNS", st.lan_dns)
         assert HOSTS_BEGIN not in open(HOSTS_FILE).read() and not st.hosts_pinned, "pins must go when the VPN is down"
         assert st.vpn_dns == [] and st.dns_slot is None, "session DNS memory cleared on disconnect"
+
+        # Office Wi-Fi: the lease lists several resolvers, two of them the very servers Check Point pushes.
+        # A baseline holding only the first one made the rest look VPN-pushed; clearing the manual slot can
+        # never remove lease resolvers, so the daemon rewrote the slot on every pass (2026-11-26).
+        office = ["172.20.1.10", "172.20.2.10", "10.0.10.10", "10.0.10.16"]
+        dhcp_ns[0], scutil_ns[0] = office, office
+        assert dhcp_dns("en0") == office, ("every resolver of the lease, not just the first", dhcp_dns("en0"))
+        evaluate(st, ctx)
+        assert st.lan_dns == office, st.lan_dns
+        scutil_ns[0] = ["10.0.10.16", "10.0.10.10", "10.80.20.180"]         # what Check Point writes into the slot
+        assert vpn_dns_servers([], exclude=st.lan_dns) == ["10.80.20.180"], "lease resolvers are never VPN-pushed"
+        # connected again on that Wi-Fi: the slot is cleared once, then left alone on every later pass
+        if os.path.isdir(ROUTES_FILE):
+            os.rmdir(ROUTES_FILE)
+        else:
+            os.remove(ROUTES_FILE)
+        uwrite(ROUTES_FILE, "10.26.0.0/16\n")
+        ctx.entries, ctx.conf_error = load_entries()
+        table[:] = [("default", "192.168.1.1", "UGScg", "en0"), ("192.168.1/24", "link#11", "UCS", "en0"),
+                    (GW, LOCAL, "UHr", "utun7"), ("default", GW, "UGSc", "utun7")] + [(d, GW, "UGSc", "utun7") for d in tiles]
+        evaluate(st, ctx)
+        assert st.vpn_dns == ["10.80.20.180"] and dns_slot[0] == [], (st.vpn_dns, dns_slot)
+        scutil_ns[0], dns_slot[0], writes = office, None, dns_writes[0]     # slot automatic: the lease resolvers show again
+        evaluate(st, ctx)
+        evaluate(st, ctx)
+        assert dns_writes[0] == writes, "lease resolvers showing after the clear must not trigger another write"
     finally:
         lan_resolve = _real_lan_resolve
         sh, log, _fetch_public_ip, STATE_DIR, STATUS_FILE, APPLIED_FILE, BACKUP_DIR, CONF_DIR, ROUTES_FILE, CONTROL_FILE, RESOLVER_DIR = saved

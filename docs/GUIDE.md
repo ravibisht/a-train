@@ -746,3 +746,31 @@ covers the Azure-first `scutil --dns` layout and asserts the slot is not rewritt
 
 Not changed, worth knowing: Azure also adds host routes for 8.8.8.8 and 8.8.4.4 through its tunnel. In the
 office, where the DHCP DNS is 8.8.8.8, every public lookup goes through Azure while it is connected.
+
+## 26. Azure "connects" after Check Point but nothing works (2026-11-26, daemon 1.6.3)
+
+Symptom: Check Point first, then the Azure VPN Client. Azure shows Connected within two seconds, yet its
+networks are unreachable. `scutil --nc status <id>` has no `IPv4`/`InterfaceName` block and no utun carries
+an Azure address. Connecting Azure first and Check Point second looks better and is just as broken when the
+daemon is not running: both say Connected, Azure's DNS and networks time out.
+
+Cause: the Azure extension reaches its gateway on a socket bound to Wi-Fi. While Check Point's hub-mode
+routes are in the table, every Wi-Fi-bound socket fails with "Network is unreachable" (DNS and TCP alike,
+measured with `IP_BOUND_IF`), so the extension has no gateway connection but still reports Connected with an
+empty configuration. It never recovers by itself. Two ways to get there:
+
+- **The daemon is not running.** On the Mac this was found on, macOS had the LaunchDaemon as *disallowed*
+  under System Settings > General > Login Items & Extensions > Allow in the Background, so launchd never
+  loaded it. `sfltool dumpbtm | grep -B4 vpnsplitd` shows the disposition without root. Turn the item on.
+- **Azure is started in the seconds between Check Point connecting and the daemon stripping the routes.**
+
+Fix (app): a Connected service without a tunnel interface is shown as "says connected, but has no tunnel";
+once the routes are stripped A-Train stops and starts it (heals in a few seconds; at most twice in ten
+minutes, never while the routes remain). "Connect Azure VPN" waits for the strip before starting.
+
+Not fixed: in **Full VPN** the routes stay by design, so Azure cannot connect; switch to Split first.
+
+Found in the same session (daemon 1.6.3): `ipconfig getoption <if> domain_name_server` prints only the
+first server of the lease. On a Wi-Fi whose lease lists several resolvers, some of them the same servers
+Check Point pushes, the rest looked VPN-pushed; clearing the manual DNS slot can never remove lease
+resolvers, so the daemon rewrote the slot on every pass. The baseline is now read from `ipconfig getpacket`.
